@@ -24,7 +24,7 @@ $(function () {
   // Some config options for forked instances
 
   // Which organisation's issues you'd like to display
-  var defaultGithubOrganisation = 'hoodiehq';
+  var defaultGithubOrganisation = 'hospitalrun';
 
   // labelForNewCommitters is the label you use for simple issues that are suitable
   // for new committers.
