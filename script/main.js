@@ -19,16 +19,39 @@
  *
  */
 
-$(function() {
-  // The github user or organisation you'd like to load issues for
-  // Defaults to hoodiehq!
-  var githubOrganisation = 'hoodiehq';
-  useHash()
-  // labelForNewCommitters is what you label simple issues for new committers with
+$(function () {
+
+  // Some config options for forked instances
+
+  // Which organisation's issues you'd like to display
+  var defaultGithubOrganisation = 'hospitalrun';
+
+  // labelForNewCommitters is the label you use for simple issues that are suitable
+  // for new committers.
   // Will expose a new button "show issues for new committers" if not empty
   var labelForNewCommitters = 'starter';
+
+  // Startup
+
+  var githubOrganisation;
+  // If ubersicht is running as a github-page, we can use the subdomain as
+  // the default organisation
+  if(window.location.host.indexOf('.github.io') !== -1){
+    githubOrganisation = window.location.host.replace('.github.io', '');
+    // If it's at espy.github.io, set to hoodieHQ, since that has more
+    // repos and issues and is a better example
+    if(githubOrganisation === 'espy'){
+      githubOrganisation = 'hoodiehq';
+    }
+  }
+  // If none of the above apply, set to default github organisation
+  if(!githubOrganisation){
+    githubOrganisation = defaultGithubOrganisation;
+  }
+  useHash();
   // Place to store metadata about all the loaded issues
   window.metadata = {
+    total: 0,
     open: 0,
     closed: 0,
     newOpen: 0,
@@ -50,7 +73,7 @@ $(function() {
   }
 
   // Show loading message in header
-  $('h1.title').append(' is loading github  / <a href="https://github.com/'+githubOrganisation+'">'+githubOrganisation+'</a>');
+  $('h1.title .titleMessage').append(' is loading github  / <a href="https://github.com/'+githubOrganisation+'">'+githubOrganisation+'</a>');
 
   // Icheck is a little umständlich here
   $('input.orange').iCheck({
@@ -96,6 +119,8 @@ $(function() {
     $('#showClosed').iCheck('uncheck');
     $('#showCommented').iCheck('check');
     $('#showUncommented').iCheck('check');
+    $('#showIssues').iCheck('check');
+    $('#showPullRequests').iCheck('uncheck');
     $('#last24Hours').iCheck('uncheck');
     $("#repos").val("").trigger("change");
     $("#labels").val(labelForNewCommitters).trigger("change");
@@ -110,6 +135,8 @@ $(function() {
     $('#showClosed').iCheck('check');
     $('#showCommented').iCheck('check');
     $('#showUncommented').iCheck('check');
+    $('#showIssues').iCheck('check');
+    $('#showPullRequests').iCheck('check');
     $('#last24Hours').iCheck('check');
     $("#repos").val("").trigger("change");
     $("#labels").val("").trigger("change");
@@ -124,6 +151,8 @@ $(function() {
     $('#showClosed').iCheck('uncheck');
     $('#showCommented').iCheck('check');
     $('#showUncommented').iCheck('check');
+    $('#showIssues').iCheck('check');
+    $('#showPullRequests').iCheck('check');
     $('#last24Hours').iCheck('check');
     $("#repos").val("").trigger("change");
     $("#labels").val("").trigger("change");
@@ -131,19 +160,17 @@ $(function() {
     $("#usernames").val("").trigger("change");
   });
 
+  function flatten(input) {
+    return input.reduce(function(a, b) {
+      return a.concat(b);
+    });
+  }
+
   // Fetch the organisation's issues with a single search request.
   // This is rate-limited to 5 requests per minute, which should be enough.
-  function getIssues(filters){
-    var query = 'per_page=100&sort=updated&q=user:' + encodeURIComponent(githubOrganisation);
-
-    if(filters){
-      if (filters.label) {
-        query += '+label:' + filters.label;
-      }
-      if (filters.state) {
-        query += '+state:' + filters.state;
-      }
-    }
+  function getIssues(page){
+    var page = page || 1;
+    var query = 'per_page=100&page=' + page + '&sort=updated&q=user:' + encodeURIComponent(githubOrganisation);
 
     // Cache for quick development
     //return $.getJSON('./script/cache.json');
@@ -151,12 +178,82 @@ $(function() {
     // The real request
     return $.ajax({
       url: 'https://api.github.com/search/issues',
-      data: query
+      data: query,
+      error: onGetIssuesError
     });
   }
 
-  function mapDataItems (data) {
-    return data.items;
+  function onGetIssuesError(data, error, type) {
+    var error = {
+      title: 'Sorry, an error occurred',
+      message: "Something went wrong while fetching data from GitHub. Here's the actual error message: "+data.status+": "+data.responseText,
+      countdown: false
+    }
+    if(data.responseText.indexOf('rate limit exceeded') != -1){
+      error.message = "Ubersicht has hit GitHub's search API rate limit. The limit is reset every 60 seconds, so Ubersicht will automatically reload as soon as it can fetch data again. You don't have to do anything! ";
+      error.countdown = true;
+      $.ajax({
+        url: 'https://api.github.com/rate_limit',
+        success: function(data){
+          var now = new Date().getTime()/1000;
+          var secondsTilRefresh = Math.ceil(data.resources.search.reset - now);
+          var reloadCountdown = new Countdown({
+            seconds: secondsTilRefresh,
+            onUpdateStatus: function(sec){
+              var countdownMessage = 'Reloading in '+sec+' seconds…';
+              if(sec === 1){
+                countdownMessage = 'Reloading in '+sec+' second…';
+              }
+              if(sec === 0){
+                countdownMessage = 'Thanks for waiting!';
+              }
+              $('.error .countdown').text(countdownMessage);
+            },
+            onCounterEnd: function(){
+              window.location.reload();
+            }
+          });
+          reloadCountdown.start();
+        }
+      });
+    }
+    var errorHTML = ich.error(error);
+    $(document.body).append(errorHTML);
+  }
+
+
+  function maybeGetMoreIssues(data){
+    if(data.total_count <= 100) {
+      // nothing to do
+      return mapDataItems(data);
+    }
+    metadata.total = data.total_count;
+    var pages = Math.ceil(data.total_count / 100);
+    // Max 5 pages to avoid hitting the rate limit
+    if(pages > 5){
+      pages = 5;
+    }
+    var calls = [];
+
+    // start at 2 because we already have page 1
+    for(var page = 2; page <= pages; page++) {
+      calls.push(getIssues(page));
+    }
+
+    return $.when.apply(this, calls).then(function() {
+      var results = Array.prototype.slice.call(arguments);
+      results.unshift(data);
+      results = _.compact(results.map(mapDataItems));
+      var flatsults = flatten(results);
+      return flatsults;
+    });
+  }
+
+  function mapDataItems (data){
+    if(typeof data === 'string' || data.responseJSON){
+      return null;
+    }
+    return data.items || data[0].items;
   }
 
   // The github search occasionally returns duplicates, this filters them out
@@ -209,6 +306,7 @@ $(function() {
         if(issue.milestone){
           issue.milestone.html_url = issue.milestone.url.replace('api.', '').replace('repos/', '').replace('milestones/', 'issues?milestone=');
         }
+        issue.is_pull_request = issue.pull_request && issue.pull_request.html_url;
       } else {
         // If it's a duplicate, remove it
         issue = undefined;
@@ -300,6 +398,19 @@ $(function() {
       }
     });
 
+    function sortLists(list, compare) {
+      list.sort(function(a, b) {
+        if(a[compare] === b[compare]) {
+          return 0;
+        }
+        return a[compare] > b[compare] ? 1 : -1;
+      });
+    };
+    sortLists(metadata.labels, 'name');
+    sortLists(metadata.usernames, 'username');
+    sortLists(metadata.milestones, 'name');
+    sortLists(metadata.repos, 'name');
+
     updateControls();
 
     return issues;
@@ -316,6 +427,8 @@ $(function() {
     var showOpen = $('#showOpen').is(':checked');
     var showCommented = $('#showCommented').is(':checked');
     var showUncommented = $('#showUncommented').is(':checked');
+    var showIssues = $('#showIssues').is(':checked');
+    var showPullRequests = $('#showPullRequests').is(':checked');
     var onlyLast24Hours = $('#last24Hours').is(':checked');
 
     // Do the actual filtering
@@ -336,6 +449,14 @@ $(function() {
       }
       // Show uncommented
       if($this.find('.comments').length === 0 && !showUncommented){
+        hide++;
+      }
+      // Show issues
+      if(!$this.hasClass('pull-request') && !showIssues){
+        hide++;
+      }
+      // Show pull requests
+      if($this.hasClass('pull-request') && !showPullRequests){
         hide++;
       }
       // Show created in last 24 hours
@@ -371,6 +492,26 @@ $(function() {
         $this.hide();
       }
     });
+
+    // update URL
+    var loc = window.location;
+    var baseUrl = [loc.protocol, '//', loc.host, loc.pathname].join('') ;
+    var qs = [
+      'showOpen=' + showOpen,
+      'showClosed=' + showClosed,
+      'showCommented=' + showCommented,
+      'showUncommented=' + showUncommented,
+      'showIssues=' + showIssues,
+      'showPullRequests=' + showPullRequests,
+      'last24Hours=' + onlyLast24Hours,
+      'repos=' + repos,
+      'labels=' + labels,
+      'milestones=' + milestones,
+      'usernames=' + usernames
+    ].join('&');
+
+    var newUrl = baseUrl + '?' + qs + loc.hash;
+    history.pushState(null, null, newUrl);
 
     updateSummary();
   }
@@ -418,6 +559,10 @@ $(function() {
 
   function updateSummary () {
     var length = $('.issues > li:visible').length;
+    var rateLimitMessage = '';
+    if(metadata.total > length){
+      rateLimitMessage = ' (Your organisation has '+metadata.total+' total issues, but Ubersicht can only display the first 500)'
+    }
     switch(length){
       case 0:
       length = "Sorry, there aren't any issues for these filter settings :/";
@@ -429,7 +574,68 @@ $(function() {
       length = length + " issues";
       break;
     }
-    $('.summary').text(length);
+    $('.summary').text(length + rateLimitMessage);
+  }
+
+ // populate filters
+  function parseURLFilters () {
+    var qss = window.location.search.substr(1).replace(/\/$/, '');
+    if(qss.length == 0) {
+      return {
+        showOpen: 'true',
+        showClosed: 'true',
+        showCommented: 'true',
+        showUncommented: 'true',
+        showIssues: 'true',
+        showPullRequests: 'true',
+        repos: '',
+        labels: '',
+        milestones: '',
+        usernames: '',
+        last24Hours: false
+      };
+    }
+    var qsPairs = qss.split('&');
+    var qs = {};
+    qsPairs.forEach(function(pair) {
+      var qsPair = pair.split('=');
+      var key = qsPair[0];
+      var value = qsPair[1];
+      qs[key] = value;
+    });
+    return qs;
+  }
+
+  function applyUrlFilters () {
+    var urlFilters = parseURLFilters();
+
+    var checkboxes = [
+      'showOpen',
+      'showClosed',
+      'last24Hours',
+      'showStarter',
+      'showCommented',
+      'showUncommented',
+      'showIssues',
+      'showPullRequests'
+    ];
+
+    var selectboxes = [
+      'repos',
+      'labels',
+      'usernames',
+      'milestones'
+    ];
+
+    checkboxes.forEach(function(checkbox) {
+      $('#' + checkbox).iCheck(urlFilters[checkbox] === 'true'?'check':'uncheck');
+    });
+
+    selectboxes.forEach(function(selectbox) {
+      $('#' + selectbox).select2('val', urlFilters[selectbox].split(','));
+    });
+
+    applyFilters();
   }
 
   /*
@@ -444,6 +650,34 @@ $(function() {
   }
   */
 
+ function Countdown(options) {
+   var timer,
+   instance = this,
+   seconds = options.seconds || 10,
+   updateStatus = options.onUpdateStatus || function () {},
+   counterEnd = options.onCounterEnd || function () {};
+
+   function decrementCounter() {
+     updateStatus(seconds);
+     if (seconds === 0) {
+       counterEnd();
+       instance.stop();
+     }
+     seconds--;
+   }
+
+   this.start = function () {
+     clearInterval(timer);
+     timer = 0;
+     seconds = options.seconds;
+     timer = setInterval(decrementCounter, 1000);
+   };
+
+   this.stop = function () {
+     clearInterval(timer);
+   };
+ }
+
   // 3
   // …
   // 2
@@ -451,11 +685,12 @@ $(function() {
   // 1
   // …
   // GO!
-  getIssues({state: 'open'})
-  .then(mapDataItems)
+  getIssues()
+  .then(maybeGetMoreIssues)
   .then(removeDuplicates)
   .then(sortIssuesByDate)
   .then(addRepoInformation)
   .then(getMetadata)
-  .then(render);
+  .then(render)
+  .then(applyUrlFilters)
 });
