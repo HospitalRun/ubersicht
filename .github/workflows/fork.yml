@@ -15,4 +15,5 @@ jobs:
         github_token: ${{ secrets.HRBOT_TOKEN }}
         owner: espy
         base: master
-        head: master
+        head: gh-pages
+
